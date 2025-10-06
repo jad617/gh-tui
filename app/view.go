@@ -91,7 +91,7 @@ func clampContent(s string, width, height int) string {
 	}
 	lines := strings.Split(s, "\n")
 
-	// width clamp
+	// width clamp per line
 	for i, l := range lines {
 		w := lipgloss.Width(l)
 		if w > width {
@@ -115,6 +115,11 @@ func clampContent(s string, width, height int) string {
 	return strings.Join(lines, "\n")
 }
 
+// Should we render the help line? Hide when the terminal is short to protect the tab row.
+func showHelp(m Model) bool {
+	return m.height >= 12
+}
+
 // ---------- View (boxes sized by INNER widths/heights) ----------
 
 func (m Model) View() string {
@@ -122,7 +127,7 @@ func (m Model) View() string {
 	tabRow := m.renderTabRow()
 
 	// 2) Box size math
-	bodyTotalH := m.bodyHeight() // TOTAL rows for the pane row incl. borders (matches update/layout)
+	bodyTotalH := m.bodyHeight() // TOTAL rows for the pane row incl. borders
 	innerH := bodyTotalH - 2     // content height inside a bordered box
 	if innerH < 1 {
 		innerH = 1
@@ -134,7 +139,7 @@ func (m Model) View() string {
 		leftInner = 1
 	}
 
-	// 3) Left content (use clamp to prevent vertical overflow)
+	// 3) Left content (strict width/height clamp)
 	leftContent := clampContent(m.lists[m.activeTab].View(), leftInner, innerH)
 	leftBox := boxStyle.Copy().
 		Width(leftInner). // content width
@@ -149,41 +154,68 @@ func (m Model) View() string {
 		if rightInner < 1 {
 			rightInner = 1
 		}
-
-		rightContent := clampContent(clipHeight(m.Vp.View(), innerH), rightInner, innerH)
+		rightContent := clampContent(m.Vp.View(), rightInner, innerH)
 		rightBox := boxStyle.Copy().
 			Width(rightInner).
 			Height(innerH).
 			Render(rightContent)
 
-		// Join two inner-sized boxes; their outer totals will sum to m.width
+		// Join two inner-sized boxes; their OUTER totals will equal m.width
 		body = lipgloss.JoinHorizontal(lipgloss.Top, leftBox, rightBox)
 	} else {
 		body = leftBox
 	}
 
-	// 5) Footers
-	help := subtleStyle.Render("[Tab/Shift+Tab] switch  [j/k/Up/Down] move  [o/Enter] open  [d] details  [r] refresh  [t] tail actions  [q] quit")
-	status := subtleStyle.Render(m.StatusMsg)
+	// 5) Footers (help is adaptive)
+	var rows []string
+	rows = append(rows, tabRow)
+	rows = append(rows, body)
+	if showHelp(m) {
+		rows = append(rows, subtleStyle.Render("[Tab/Shift+Tab] switch  [j/k/Up/Down] move  [o/Enter] open  [d] details  [r] refresh  [t] tail actions  [q] quit"))
+	}
+	rows = append(rows, subtleStyle.Render(m.StatusMsg))
 
-	// 6) Final stack
-	return lipgloss.JoinVertical(lipgloss.Left, tabRow, body, help, status)
+	screen := lipgloss.JoinVertical(lipgloss.Left, rows...)
+
+	// 6) FINAL SAFETY: clamp the ENTIRE screen to terminal width & height
+	return finalizeScreen(screen, m.width, m.height)
 }
 
-// Clip text vertically to avoid pushing tabs off-screen.
-// Used right before rendering m.Vp.View() in the details pane.
-func clipHeight(s string, height int) string {
-	if height <= 0 {
-		return ""
+// ---------- Final full-screen clamp ----------------------------------
+
+// finalizeScreen ensures the full rendered screen fits exactly within width x height.
+// We keep TOP lines (so the tabs never disappear), and trim each line to width.
+func finalizeScreen(s string, width, height int) string {
+	if width < 1 {
+		width = 1
+	}
+	if height < 1 {
+		height = 1
 	}
 	lines := strings.Split(s, "\n")
+
+	// Keep TOP 'height' lines (protect the tab row). If we cut, end with an ellipsis line.
 	if len(lines) > height {
 		if height == 1 {
-			return "…"
+			lines = []string{"…"}
+		} else {
+			lines = append(lines[:height-1], "…")
 		}
-		cut := lines[:height]
-		cut[len(cut)-1] = "…"
-		return strings.Join(cut, "\n")
 	}
-	return s
+
+	// Trim each line to <= width (protect the right border region)
+	for i, l := range lines {
+		w := lipgloss.Width(l)
+		if w > width {
+			if width == 1 {
+				lines[i] = "…"
+			} else {
+				lines[i] = truncRunes(l, width-1) + "…"
+			}
+		} else if w < width {
+			lines[i] = l + strings.Repeat(" ", width-w)
+		}
+	}
+
+	return strings.Join(lines, "\n")
 }
